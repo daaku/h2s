@@ -16,6 +16,13 @@ import (
 	"github.com/pkg/errors"
 )
 
+func logger(next http.Handler) http.Handler {
+  return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    log.Printf("%s %s\n", r.Method, r.URL)
+    next.ServeHTTP(w, r)
+  })
+}
+
 type conf struct {
 	httpsAddr   string
 	publicDir   string
@@ -39,7 +46,7 @@ func run(c *conf) error {
 
 	httpsServer := &http.Server{
 		Addr:    c.httpsAddr,
-		Handler: gzipMiddleware(http.FileServer(http.Dir(c.publicDir))),
+		Handler: logger(gzipMiddleware(http.FileServer(http.Dir(c.publicDir)))),
 	}
 
 	shutdownDone := make(chan struct{})

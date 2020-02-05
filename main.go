@@ -2,6 +2,7 @@ package main // import "github.com/daaku/h2s"
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"log"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/NYTimes/gziphandler"
@@ -17,20 +19,33 @@ import (
 )
 
 func logger(next http.Handler) http.Handler {
-  return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-    log.Printf("%s %s\n", r.Method, r.URL)
-    next.ServeHTTP(w, r)
-  })
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("%s %s\n", r.Method, r.URL)
+		next.ServeHTTP(w, r)
+	})
 }
 
 type conf struct {
-	httpsAddr   string
-	publicDir   string
-	tlsCertFile string
-	tlsKeyFile  string
+	addr string
+	dir  string
+	tls  string
 }
 
 func run(c *conf) error {
+	tlsConfig := &tls.Config{}
+	for _, pair := range strings.Split(c.tls, ",") {
+		ck := strings.SplitN(pair, ":", 2)
+		if len(ck) != 2 {
+			return errors.Errorf("invalid tls cert:key pair: %s", pair)
+		}
+		cert, err := tls.LoadX509KeyPair(ck[0], ck[1])
+		if err != nil {
+			return errors.Wrapf(err, "invalid tls cert:key pair: %s", pair)
+		}
+		tlsConfig.Certificates = append(tlsConfig.Certificates, cert)
+	}
+	tlsConfig.BuildNameToCertificate()
+
 	gzipMiddleware, err := gziphandler.GzipHandlerWithOpts(
 		gziphandler.ContentTypes([]string{
 			"application/javascript",
@@ -45,8 +60,9 @@ func run(c *conf) error {
 	}
 
 	httpsServer := &http.Server{
-		Addr:    c.httpsAddr,
-		Handler: logger(gzipMiddleware(http.FileServer(http.Dir(c.publicDir)))),
+		Addr:      c.addr,
+		Handler:   logger(gzipMiddleware(http.FileServer(http.Dir(c.dir)))),
+		TLSConfig: tlsConfig,
 	}
 
 	shutdownDone := make(chan struct{})
@@ -61,8 +77,12 @@ func run(c *conf) error {
 		close(shutdownDone)
 	}()
 
-	log.Printf("Starting server for https://%s/", c.httpsAddr)
-	err = httpsServer.ListenAndServeTLS(c.tlsCertFile, c.tlsKeyFile)
+	listener, err := tls.Listen("tcp", c.addr, tlsConfig)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	log.Printf("Starting server for https://%s/", c.addr)
+	err = httpsServer.Serve(listener)
 	if err != nil && err != http.ErrServerClosed {
 		return errors.WithStack(err)
 	}
@@ -81,10 +101,9 @@ func main() {
 
 	c := conf{}
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-	fs.StringVar(&c.httpsAddr, "https-addr", "", "https server address")
-	fs.StringVar(&c.publicDir, "public-dir", "", "public files directory")
-	fs.StringVar(&c.tlsCertFile, "tls-cert-file", "", "tls cert file")
-	fs.StringVar(&c.tlsKeyFile, "tls-key-file", "", "tls key file")
+	fs.StringVar(&c.addr, "addr", "", "https server address")
+	fs.StringVar(&c.dir, "dir", "", "public files directory")
+	fs.StringVar(&c.tls, "tls", "", "tls cert1:key1,cert2:key2 pairs")
 
 	ff.Parse(fs, os.Args[1:], ff.WithEnvVarPrefix("H2S"))
 
